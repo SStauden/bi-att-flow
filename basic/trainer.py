@@ -58,6 +58,8 @@ class MultiGPUTrainer(object):
         self.train_op = self.opt.apply_gradients(self.grads, global_step=self.global_step)
 
     def step(self, sess, batches, get_summary=False):
+        print("IN step: batches:")
+        print(batches)
         assert isinstance(sess, tf.Session)
         feed_dict = {}
         for batch, model in zip(batches, self.models):

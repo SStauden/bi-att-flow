@@ -1,0 +1,10 @@
+data/squad
+*.json
+glove.6B.100d.txt
+basic
+core
+out
+save
+save.zip
+testing
+training_out

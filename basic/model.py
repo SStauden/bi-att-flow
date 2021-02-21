@@ -301,20 +301,32 @@ class Model(object):
             feed_dict[self.y2] = y2
 
             for i, (xi, cxi, yi) in enumerate(zip(X, CX, batch.data['y'])):
-                start_idx, stop_idx = random.choice(yi)
-                j, k = start_idx
-                j2, k2 = stop_idx
-                if config.single:
-                    X[i] = [xi[j]]
-                    CX[i] = [cxi[j]]
-                    j, j2 = 0, 0
-                if config.squash:
-                    offset = sum(map(len, xi[:j]))
-                    j, k = 0, k + offset
-                    offset = sum(map(len, xi[:j2]))
-                    j2, k2 = 0, k2 + offset
-                y[i, j, k] = True
-                y2[i, j2, k2-1] = True
+
+                try:
+
+                    # print("\n\nIN get_feed_dict: batch.data['y']:")
+                    # print(batch.data['y'])
+                    # print("(xi, cxi, yi):")
+                    # print("xi: {}, cxi: {}, yi: {}".format(xi, cxi, yi))
+                    if len(yi) == 0:
+                        continue
+
+                    start_idx, stop_idx = random.choice(yi)
+                    j, k = start_idx
+                    j2, k2 = stop_idx
+                    if config.single:
+                        X[i] = [xi[j]]
+                        CX[i] = [cxi[j]]
+                        j, j2 = 0, 0
+                    if config.squash:
+                        offset = sum(map(len, xi[:j]))
+                        j, k = 0, k + offset
+                        offset = sum(map(len, xi[:j2]))
+                        j2, k2 = 0, k2 + offset
+                    y[i, j, k] = True
+                    y2[i, j2, k2-1] = True
+                except:
+                    continue
 
         def _get_word(word):
             d = batch.shared['word2idx']

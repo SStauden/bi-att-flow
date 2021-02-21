@@ -10,11 +10,61 @@ from tqdm import tqdm
 
 from squad.utils import get_word_span, get_word_idx, process_tokens
 
+# -------
+# |SQUAD|
+# -------
+
+squad_base = "/data/users/sstauden/dev/nn_robustness/datasets/SQuAD/"
+
+# ORIGINAL V1
+SQUAD_ORIGINAL_V1_train = squad_base + "original/V1/train-v1.1.json"
+SQUAD_ORIGINAL_V1_dev = squad_base + "original/V1/dev-v1.1.json"
+
+# ADDSENT V1
+SQUAD_ADDSENT_V1_train = squad_base + "adversarial/AddSent/V1/train_addsent/train-convHighConf.json"
+SQUAD_ADDSENT_V1_dev = squad_base + "adversarial/AddSent/V1/dev_addsent/dev-convHighConf.json"
+
+# ADDSENTDIVERSE V1
+SQUAD_ADDSENTDIV_V1_train = squad_base + "adversarial/AddSentDiverse/train_addsentdiverse/train_addsentdiv.json"
+SQUAD_ADDSENTDIV_V1_dev = squad_base + "adversarial/AddSentDiverse/dev_addsentdiverse/dev_addsentdiv.json"
+
+# WORD SWAP 04 NOISE
+SQUAD_WORDSWAP_train = squad_base + "adversarial/WordSwap04/WordSwap04_train.json"
+SQUAD_WORDSWAP_dev = squad_base + "adversarial/WordSwap04/WordSwap04_dev.json"
+
+attack_dict = {
+  'original': {
+    'train': SQUAD_ORIGINAL_V1_train, 
+    'test': SQUAD_ORIGINAL_V1_dev
+  },
+  'AddSent': {
+    'train': SQUAD_ADDSENT_V1_train, 
+    'test': SQUAD_ADDSENT_V1_dev
+  },
+  'AddSentDiv': {
+    'train': SQUAD_ADDSENTDIV_V1_train, 
+    'test': SQUAD_ADDSENTDIV_V1_dev
+  },
+  'WordSwap': {
+    'train': SQUAD_WORDSWAP_train, 
+    'test': SQUAD_WORDSWAP_dev
+  },
+}
+
+def run_prepro(attack_name):
+    args = get_args()
+
+    train_path = attack_dict[attack_name]['train']
+    dev_path = attack_dict[attack_name]['test']
+    test_path = attack_dict[attack_name]['test']
+
+    target_dir = "prepro_data/" + attack_name
+
+    prepro_extended(args, train_path, dev_path, test_path, target_dir)
 
 def main():
     args = get_args()
     prepro(args)
-
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -73,13 +123,24 @@ def prepro(args):
         prepro_each(args, 'train', args.train_ratio, 1.0, out_name='dev')
         prepro_each(args, 'dev', out_name='test')
 
+def prepro_extended(args, train_path, dev_path, test_path, target_dir):
+
+    args.target_dir = target_dir
+
+    if not os.path.exists(args.target_dir):
+        os.makedirs(args.target_dir)
+
+    if args.mode == 'full':
+        prepro_each(args, 'train', out_name='train', in_path=train_path)
+        prepro_each(args, 'dev', out_name='dev', in_path=dev_path)
+        # prepro_each(args, 'dev', out_name='test', in_path=test_path)
+
 
 def save(args, data, shared, data_type):
     data_path = os.path.join(args.target_dir, "data_{}.json".format(data_type))
     shared_path = os.path.join(args.target_dir, "shared_{}.json".format(data_type))
     json.dump(data, open(data_path, 'w'))
     json.dump(shared, open(shared_path, 'w'))
-
 
 def get_word2vec(args, word_counter):
     glove_path = os.path.join(args.glove_dir, "glove.{}.{}d.txt".format(args.glove_corpus, args.glove_vec_size))
@@ -161,7 +222,9 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
             rxi = [ai, pi]
             assert len(x) - 1 == ai
             assert len(x[ai]) - 1 == pi
+            # print(context)
             for qa in para['qas']:
+                # print(qa)
                 # get words
                 qi = word_tokenize(qa['question'])
                 cqi = [list(qij) for qij in qi]
@@ -169,6 +232,7 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
                 cyi = []
                 answers = []
                 for answer in qa['answers']:
+                   
                     answer_text = answer['text']
                     answers.append(answer_text)
                     answer_start = answer['answer_start']
@@ -185,11 +249,16 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
                     i1 = get_word_idx(context, xi, (yi1[0], yi1[1]-1))
                     cyi0 = answer_start - i0
                     cyi1 = answer_stop - i1 - 1
-                    # print(answer_text, w0[cyi0:], w1[:cyi1+1])
-                    assert answer_text[0] == w0[cyi0], (answer_text, w0, cyi0)
-                    assert answer_text[-1] == w1[cyi1]
-                    assert cyi0 < 32, (answer_text, w0)
-                    assert cyi1 < 32, (answer_text, w1)
+                    # print(answer_text, ",", w0[cyi0:], ",",  w1[:cyi1+1])   
+                    try:
+                        assert answer_text[0] == w0[cyi0], (answer_text, w0, cyi0)
+                        assert answer_text[-1] == w1[cyi1]
+                        assert cyi0 < 32, (answer_text, w0)
+                        assert cyi1 < 32, (answer_text, w1)
+                    except:
+                        print("Problem with {}".format(qa))
+                        print("skipping")
+                        continue
 
                     yi.append([yi0, yi1])
                     cyi.append([cyi0, cyi1])
@@ -229,4 +298,8 @@ def prepro_each(args, data_type, start_ratio=0.0, stop_ratio=1.0, out_name="defa
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    # run_prepro('original')
+    # run_prepro('AddSent')
+    # run_prepro('AddSentDiv')
+    run_prepro('WordSwap')

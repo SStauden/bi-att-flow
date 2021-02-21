@@ -10,6 +10,10 @@ import numpy as np
 from my.tensorflow import grouper
 from my.utils import index
 
+import sys
+from pathlib import Path
+import tensorflow as tf
+
 
 class Data(object):
     def get_size(self):
@@ -154,6 +158,76 @@ def load_metadata(config, data_type):
             config.__setattr__(key, val)
         return metadata
 
+def read_data_extended(config, data_type, ref, data_filter=None, data_path="", shared_path=""):
+    data_file_path = os.path.join(data_path, "data_{}.json".format(data_type))
+    shared_file_path = os.path.join(shared_path, "shared_{}.json".format(data_type))
+    with open(data_file_path, 'r') as fh:
+        data = json.load(fh)
+    with open(shared_file_path, 'r') as fh:
+        shared = json.load(fh)
+
+    num_examples = len(next(iter(data.values())))
+    if data_filter is None:
+        valid_idxs = range(num_examples)
+    else:
+        mask = []
+        keys = data.keys()
+        values = data.values()
+        for vals in zip(*values):
+            each = {key: val for key, val in zip(keys, vals)}
+            mask.append(data_filter(each, shared))
+        valid_idxs = [idx for idx in range(len(mask)) if mask[idx]]
+
+    print("Loaded {}/{} examples from {}".format(len(valid_idxs), num_examples, data_type))
+    
+    shared_path = config.shared_path or os.path.join(config.out_dir, "shared.json")
+    print("Shared Path is {}".format(shared_path))
+    # shared_path = shared_file_path
+    if not ref:
+        word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
+        word_counter = shared['lower_word_counter'] if config.lower_word else shared['word_counter']
+        char_counter = shared['char_counter']
+        if config.finetune:
+            shared['word2idx'] = {word: idx + 2 for idx, word in
+                                  enumerate(word for word, count in word_counter.items()
+                                            if count > config.word_count_th or (config.known_if_glove and word in word2vec_dict))}
+        else:
+            assert config.known_if_glove
+            assert config.use_glove_for_unk
+            shared['word2idx'] = {word: idx + 2 for idx, word in
+                                  enumerate(word for word, count in word_counter.items()
+                                            if count > config.word_count_th and word not in word2vec_dict)}
+        shared['char2idx'] = {char: idx + 2 for idx, char in
+                              enumerate(char for char, count in char_counter.items()
+                                        if count > config.char_count_th)}
+        NULL = "-NULL-"
+        UNK = "-UNK-"
+        shared['word2idx'][NULL] = 0
+        shared['word2idx'][UNK] = 1
+        shared['char2idx'][NULL] = 0
+        shared['char2idx'][UNK] = 1
+        json.dump({'word2idx': shared['word2idx'], 'char2idx': shared['char2idx']}, open(shared_path, 'w'))
+    else:
+        new_shared = json.load(open(shared_path, 'r'))
+        for key, val in new_shared.items():
+            shared[key] = val
+
+    if config.use_glove_for_unk:
+        # create new word2idx and word2vec
+        word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
+        new_word2idx_dict = {word: idx for idx, word in enumerate(word for word in word2vec_dict.keys() if word not in shared['word2idx'])}
+        shared['new_word2idx'] = new_word2idx_dict
+        offset = len(shared['word2idx'])
+        word2vec_dict = shared['lower_word2vec'] if config.lower_word else shared['word2vec']
+        new_word2idx_dict = shared['new_word2idx']
+        idx2vec_dict = {idx: word2vec_dict[word] for word, idx in new_word2idx_dict.items()}
+        # print("{}/{} unique words have corresponding glove vectors.".format(len(idx2vec_dict), len(word2idx_dict)))
+        new_emb_mat = np.array([idx2vec_dict[idx] for idx in range(len(idx2vec_dict))], dtype='float32')
+        shared['new_emb_mat'] = new_emb_mat
+
+    data_set = DataSet(data, data_type, shared=shared, valid_idxs=valid_idxs)
+    return data_set
+
 
 def read_data(config, data_type, ref, data_filter=None):
     data_path = os.path.join(config.data_dir, "data_{}.json".format(data_type))
@@ -286,10 +360,18 @@ def update_config(config, data_sets):
     for data_set in data_sets:
         data = data_set.data
         shared = data_set.shared
-        for idx in data_set.valid_idxs:
+        for idx in data_set.valid_idxs:        
             rx = data['*x'][idx]
             q = data['q'][idx]
+            # print("rx: {}".format(rx))
+            # if len(shared['x']) <= rx[0]:
+            #     print("shared['x'] has len {} and rx[0] is {}".format(len(shared['x']), rx[0]))
+            #     assert False
+            # if len(shared['x'][rx[0]]) <= rx[1]:
+            #     print("shared['x'][rx[0]] has len {} and rx[1] is {}".format(len(shared['x'][rx[0]]), rx[1]))
+            #     assert False
             sents = shared['x'][rx[0]][rx[1]]
+            # print(sents)
             config.max_para_size = max(config.max_para_size, sum(map(len, sents)))
             config.max_num_sents = max(config.max_num_sents, len(sents))
             config.max_sent_size = max(config.max_sent_size, max(map(len, sents)))
@@ -314,3 +396,135 @@ def update_config(config, data_sets):
     if config.squash:
         config.max_sent_size = config.max_para_size
         config.max_num_sents = 1
+
+if __name__ == "__main__":
+
+        
+    flags = tf.app.flags
+
+    sys.path.insert(0,'/data/users/sstauden/dev/nn_robustness/datasets')
+    import DatasetPaths
+
+    # Names and directories
+    flags.DEFINE_string("model_name", "basic", "Model name [basic]")
+    flags.DEFINE_string("data_dir", "data/squad", "Data dir [data/squad]")
+    flags.DEFINE_string("run_id", "0", "Run ID [0]")
+    flags.DEFINE_string("out_base_dir", "out", "out base dir [out]")
+    flags.DEFINE_string("forward_name", "single", "Forward name [single]")
+    flags.DEFINE_string("answer_path", "", "Answer path []")
+    flags.DEFINE_string("eval_path", "", "Eval path []")
+    flags.DEFINE_string("load_path", "", "Load path []")
+    flags.DEFINE_string("shared_path", "", "Shared path []")
+
+    # Device placement
+    flags.DEFINE_string("device", "/cpu:0", "default device for summing gradients. [/cpu:0]")
+    flags.DEFINE_string("device_type", "gpu", "device for computing gradients (parallelization). cpu | gpu [gpu]")
+    flags.DEFINE_integer("num_gpus", 1, "num of gpus or cpus for computing gradients [1]")
+
+    # Essential training and test options
+    flags.DEFINE_string("mode", "test", "trains | test | forward [test]")
+    flags.DEFINE_boolean("load", True, "load saved data? [True]")
+    flags.DEFINE_bool("single", False, "supervise only the answer sentence? [False]")
+    flags.DEFINE_boolean("debug", False, "Debugging mode? [False]")
+    flags.DEFINE_bool('load_ema', True, "load exponential average of variables when testing?  [True]")
+    flags.DEFINE_bool("eval", True, "eval? [True]")
+
+    # Training / test parameters
+    flags.DEFINE_integer("batch_size", 60, "Batch size [60]")
+    flags.DEFINE_integer("val_num_batches", 100, "validation num batches [100]")
+    flags.DEFINE_integer("test_num_batches", 0, "test num batches [0]")
+    flags.DEFINE_integer("num_epochs", 12, "Total number of epochs for training [12]")
+    flags.DEFINE_integer("num_steps", 20000, "Number of steps [20000]")
+    flags.DEFINE_integer("load_step", 0, "load step [0]")
+    flags.DEFINE_float("init_lr", 0.5, "Initial learning rate [0.5]")
+    flags.DEFINE_float("input_keep_prob", 0.8, "Input keep prob for the dropout of LSTM weights [0.8]")
+    flags.DEFINE_float("keep_prob", 0.8, "Keep prob for the dropout of Char-CNN weights [0.8]")
+    flags.DEFINE_float("wd", 0.0, "L2 weight decay for regularization [0.0]")
+    flags.DEFINE_integer("hidden_size", 100, "Hidden size [100]")
+    flags.DEFINE_integer("char_out_size", 100, "char-level word embedding size [100]")
+    flags.DEFINE_integer("char_emb_size", 8, "Char emb size [8]")
+    flags.DEFINE_string("out_channel_dims", "100", "Out channel dims of Char-CNN, separated by commas [100]")
+    flags.DEFINE_string("filter_heights", "5", "Filter heights of Char-CNN, separated by commas [5]")
+    flags.DEFINE_bool("finetune", False, "Finetune word embeddings? [False]")
+    flags.DEFINE_bool("highway", True, "Use highway? [True]")
+    flags.DEFINE_integer("highway_num_layers", 2, "highway num layers [2]")
+    flags.DEFINE_bool("share_cnn_weights", True, "Share Char-CNN weights [True]")
+    flags.DEFINE_bool("share_lstm_weights", True, "Share pre-processing (phrase-level) LSTM weights [True]")
+    flags.DEFINE_float("var_decay", 0.999, "Exponential moving average decay for variables [0.999]")
+
+    # Optimizations
+    flags.DEFINE_bool("cluster", False, "Cluster data for faster training [False]")
+    flags.DEFINE_bool("len_opt", False, "Length optimization? [False]")
+    flags.DEFINE_bool("cpu_opt", False, "CPU optimization? GPU computation can be slower [False]")
+
+    # Logging and saving options
+    flags.DEFINE_boolean("progress", True, "Show progress? [True]")
+    flags.DEFINE_integer("log_period", 100, "Log period [100]")
+    flags.DEFINE_integer("eval_period", 1000, "Eval period [1000]")
+    flags.DEFINE_integer("save_period", 1000, "Save Period [1000]")
+    flags.DEFINE_integer("max_to_keep", 20, "Max recent saves to keep [20]")
+    flags.DEFINE_bool("dump_eval", True, "dump eval? [True]")
+    flags.DEFINE_bool("dump_answer", True, "dump answer? [True]")
+    flags.DEFINE_bool("vis", False, "output visualization numbers? [False]")
+    flags.DEFINE_bool("dump_pickle", True, "Dump pickle instead of json? [True]")
+    flags.DEFINE_float("decay", 0.9, "Exponential moving average decay for logging values [0.9]")
+
+    # Thresholds for speed and less memory usage
+    flags.DEFINE_integer("word_count_th", 10, "word count th [100]")
+    flags.DEFINE_integer("char_count_th", 50, "char count th [500]")
+    flags.DEFINE_integer("sent_size_th", 400, "sent size th [64]")
+    flags.DEFINE_integer("num_sents_th", 8, "num sents th [8]")
+    flags.DEFINE_integer("ques_size_th", 30, "ques size th [32]")
+    flags.DEFINE_integer("word_size_th", 16, "word size th [16]")
+    flags.DEFINE_integer("para_size_th", 256, "para size th [256]")
+
+    # Advanced training options
+    flags.DEFINE_bool("lower_word", True, "lower word [True]")
+    flags.DEFINE_bool("squash", False, "squash the sentences into one? [False]")
+    flags.DEFINE_bool("swap_memory", True, "swap memory? [True]")
+    flags.DEFINE_string("data_filter", "max", "max | valid | semi [max]")
+    flags.DEFINE_bool("use_glove_for_unk", True, "use glove for unk [False]")
+    flags.DEFINE_bool("known_if_glove", True, "consider as known if present in glove [False]")
+    flags.DEFINE_string("logit_func", "tri_linear", "logit func [tri_linear]")
+    flags.DEFINE_string("answer_func", "linear", "answer logit func [linear]")
+    flags.DEFINE_string("sh_logit_func", "tri_linear", "sh logit func [tri_linear]")
+
+    # Ablation options
+    flags.DEFINE_bool("use_char_emb", True, "use char emb? [True]")
+    flags.DEFINE_bool("use_word_emb", True, "use word embedding? [True]")
+    flags.DEFINE_bool("q2c_att", True, "question-to-context attention? [True]")
+    flags.DEFINE_bool("c2q_att", True, "context-to-question attention? [True]")
+    flags.DEFINE_bool("dynamic_att", False, "Dynamic attention [False]")
+
+    config = flags.FLAGS
+
+    
+    prepro_base = "/nethome/sstauden/bi-att-flow/prepro_data/"
+
+    attack_dict = {
+        'original': {
+            'train': prepro_base + "original", 
+            'test': prepro_base + "original"
+        },
+        'AddSent': {
+            'train': prepro_base + "AddSent", 
+            'test': prepro_base + "AddSent"
+        },
+        'AddSentDiv': {
+            'train': prepro_base + "AddSentDiv", 
+            'test': prepro_base + "AddSentDiv"
+        },
+        'WordSwap': {
+            'train': prepro_base + "WordSwap", 
+            'test': prepro_base + "WordSwap"
+        },
+    }
+
+    attack_name = "WordSwap"
+    data_path = attack_dict[attack_name]['train']
+    config.out_dir = os.path.join("x_training_" + config.out_base_dir, attack_name)
+
+
+    dataset = read_data_extended(config, 'dev', False, data_path=data_path, shared_path=data_path)
+    print(attack_name, " has ", str(dataset.num_examples), " samples")
+    print(len(dataset.data['ids']))
